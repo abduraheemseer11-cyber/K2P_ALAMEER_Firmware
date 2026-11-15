@@ -59,7 +59,7 @@ jobs:
       - name: Build firmware (make K2P)
         working-directory: rt-n56u/trunk
         run: |
-          sudo ./clean_sources || true
+          if [ -x ./clear_tree ]; then sudo ./clear_tree || true; elif [ -x ./clean_sources ]; then sudo ./clean_sources || true; fi
           sudo ./build_firmware_modify ${TARGET}
           sudo chown -R "$(id -u):$(id -g)" .
 
