@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
-OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
+OPENWRT_REPO="${OPENWRT_REPO:-https://github.com}"
 OPENWRT_TAG="${OPENWRT_TAG:-v23.05.5}"
 JOBS="${JOBS:-$(nproc)}"
 WRTMAX_VERSION="2.0.0"
@@ -93,6 +93,8 @@ RB="$(find "$SRC/build_dir" -maxdepth 3 -type d -name 'wireless-regdb-*' | head 
 [[ -n "$RB" ]] || die "wireless-regdb build dir not found after prepare"
 "$SRC/package/firmware/wireless-regdb/wrtmax/build-regdb.sh" "$RB" || die "could not add the CT domain to regulatory.db"
 cp "$RB/db.txt" "$OUT/source-patches/wireless-regdb-db.txt"
+mkdir -p "$STAGE/lib/firmware"
+cp "$RB/regulatory.db" "$STAGE/lib/firmware/regulatory.db"
 mk package/firmware/wireless-regdb/compile
 
 say "Super Channel: allow the locally built (unsigned) regulatory.db in cfg80211"
@@ -117,10 +119,9 @@ fi
 # ---------------------------------------------------------------- 7. verification + output
 say "Verifying what was really built"
 scripts/verify-kernel.sh "$SRC" "$OUT/kernel-feature-report.txt" || die "kernel feature verification failed (see report)"
-REGIPK="$(ls "$SRC"/bin/packages/*/base/wireless-regdb_*.ipk 2>/dev/null | head -1)"
-if [[ -f "$REGIPK" ]]; then
-  python3 scripts/regdb-has-country.py "$REGIPK" CT | tee -a "$OUT/kernel-feature-report.txt" || die "CT country missing from the packaged regulatory.db"
-else echo "  (wireless-regdb ipk not found - skipped)"; fi
+if [[ -f "$STAGE/lib/firmware/regulatory.db" ]]; then
+  python3 scripts/regdb-has-country.py "$STAGE/lib/firmware/regulatory.db" CT | tee -a "$OUT/kernel-feature-report.txt" || die "CT country missing from regulatory.db"
+else echo "  (regulatory.db not found - skipped)"; fi
 scripts/check-image.sh "$SRC" "$OUT" || die "image size check failed"
 cp "$SRC/.config" "$OUT/final.config"
 say "DONE - firmware: output/WrtMax-K2P-v2-sysupgrade.bin"
