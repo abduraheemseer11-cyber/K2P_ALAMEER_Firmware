@@ -1,0 +1,46 @@
+#!/bin/sh
+# Called every minute from cron
+. /lib/wrtmax/common.sh
+[ "$(G wrtmax.watchdog.enabled)" = 1 ] || exit 0
+S=/tmp/wrtmax-wd; mkdir -p $S
+
+# scheduled daily reboot
+RT=$(G wrtmax.watchdog.reboot_at)
+if [ -n "$RT" ] && [ "$(date +%H:%M)" = "$RT" ] && [ "$(cut -d. -f1 /proc/uptime)" -gt 300 ]; then
+  logger -t wrtmax-watchdog "scheduled reboot"; sync; reboot; exit 0
+fi
+
+# network check
+TG=$(G wrtmax.watchdog.target); [ -n "$TG" ] || TG=$(G network.lan.gateway)
+FAILS=$(G wrtmax.watchdog.fails); [ -n "$FAILS" ] || FAILS=5
+if [ -n "$TG" ]; then
+  if ping -c 2 -W 2 "$TG" >/dev/null 2>&1; then
+    echo 0 > $S/fails; echo 0 > $S/restarts
+  else
+    f=$(( $(cat $S/fails 2>/dev/null || echo 0) + 1 )); echo $f > $S/fails
+    if [ "$f" -ge "$FAILS" ]; then
+      echo 0 > $S/fails
+      r=$(( $(cat $S/restarts 2>/dev/null || echo 0) + 1 )); echo $r > $S/restarts
+      if [ "$r" -ge 3 ] && [ "$(G wrtmax.watchdog.reboot_on_fail)" = 1 ]; then
+        logger -t wrtmax-watchdog "no reply from $TG - rebooting"; sync; reboot; exit 0
+      fi
+      logger -t wrtmax-watchdog "no reply from $TG - restarting network"
+      /etc/init.d/network restart
+    fi
+  fi
+fi
+
+# Wi-Fi radios up?
+if [ "$(G wrtmax.watchdog.wifi)" = 1 ]; then
+  for r in $(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+    [ "$(G wireless.$r.disabled)" = 1 ] && continue
+    up=$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.up")
+    if [ "$up" = "false" ]; then
+      w=$(( $(cat $S/wifi_$r 2>/dev/null || echo 0) + 1 )); echo $w > $S/wifi_$r
+      if [ "$w" -ge 2 ]; then echo 0 > $S/wifi_$r; logger -t wrtmax-watchdog "$r is down - reloading Wi-Fi"; wifi reload; fi
+    else
+      echo 0 > $S/wifi_$r
+    fi
+  done
+fi
+exit 0

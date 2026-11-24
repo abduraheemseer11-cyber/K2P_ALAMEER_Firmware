@@ -1,0 +1,258 @@
+#!/bin/sh
+# rpcd exec-plugin  ->  ubus object "wrtmax"
+. /usr/share/libubox/jshn.sh
+. /lib/wrtmax/common.sh
+[ -f /etc/wrtmax_release ] && . /etc/wrtmax_release
+
+case "$1" in
+list)
+  cat <<'JSON'
+{ "status":{}, "traffic":{}, "ports":{}, "clients":{}, "scan":{}, "assistant":{},
+  "assistant_fix":{"id":"x"}, "client_block":{"mac":"x"}, "client_unblock":{"mac":"x"},
+  "client_limit":{"mac":"x","down":0,"up":0}, "apply_config":{}, "save_settings":{},
+  "apply_mode":{"mode":"x","ip":"x","mask":"x","gw":"x","dns":"x","band":"x","ssid":"x","key":"x","bssid":"x",
+                "wan_proto":"x","user":"x","pass":"x","wan_ip":"x","wan_mask":"x","wan_gw":"x"},
+  "ota":{"action":"x"}, "loop_state":{}, "loop_reset":{"port":"x"}, "cpu_status":{}, "reg_status":{},
+  "qos_status":{}, "offload_status":{}, "set_lang":{"lang":"x"} }
+JSON
+  ;;
+call)
+  IN=$(cat); J() { echo "$IN" | jsonfilter -e "@.$1"; }
+  case "$2" in
+
+  status)
+    json_init
+    json_add_string hostname "$(cat /proc/sys/kernel/hostname)"
+    json_add_string model "$(jsonfilter -s "$(ubus call system board)" -e '@.model')"
+    json_add_string version "$WRTMAX_VERSION"
+    json_add_string openwrt "$WRTMAX_OPENWRT"
+    json_add_string build "$WRTMAX_BUILD"
+    json_add_string support "$WRTMAX_SUPPORT"
+    json_add_string mode "$(G wrtmax.net.mode)"
+    json_add_string lan_ip "$(G network.lan.ipaddr)"
+    json_add_int uptime "$(cut -d. -f1 /proc/uptime)"
+    json_add_string load "$(cut -d' ' -f1 /proc/loadavg)"
+    mt=$(awk '/^MemTotal/{print $2}' /proc/meminfo); ma=$(awk '/^MemAvailable/{print $2}' /proc/meminfo)
+    json_add_int mem_total "${mt:-0}"; json_add_int mem_free "${ma:-0}"
+    if [ "${mt:-0}" -gt 0 ]; then json_add_int mem_pct "$(( (mt - ma) * 100 / mt ))"; else json_add_int mem_pct 0; fi
+    # temperature: CPU thermal zone, otherwise the Wi-Fi chip sensor
+    temp=""; src=""
+    for f in /sys/class/thermal/thermal_zone*/temp; do [ -r "$f" ] && { temp=$(cat $f); src="CPU"; break; }; done
+    if [ -z "$temp" ]; then
+      for f in /sys/class/hwmon/hwmon*/temp1_input; do [ -r "$f" ] && { temp=$(cat $f); src="Wi-Fi chip"; break; }; done
+    fi
+    [ -n "$temp" ] && { json_add_int temp "$((temp / 1000))"; json_add_string temp_src "$src"; }
+    [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ] && json_add_int cpu_khz "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq)"
+    json_add_int cores_online "$(n=0; for c in /sys/devices/system/cpu/cpu[0-9]*; do [ "$(cat $c/online 2>/dev/null || echo 1)" = 1 ] && n=$((n+1)); done; echo $n)"
+    json_add_boolean offload "$([ "$(G firewall.@defaults[0].flow_offloading)" = 1 ] && echo 1 || echo 0)"
+    json_add_boolean super "$([ "$(G wrtmax.wifi.super)" = 1 ] && echo 1 || echo 0)"
+    c2=0; c5=0
+    for i in $(ap_ifaces); do
+      n=$(iwinfo $i assoclist 2>/dev/null | grep -c '^[0-9A-Fa-f][0-9A-Fa-f]:')
+      if [ "$(iface_band $i)" = 2g ]; then c2=$((c2+n)); else c5=$((c5+n)); fi
+    done
+    json_add_int clients_2g "$c2"; json_add_int clients_5g "$c5"
+    json_add_int flash_free_kb "$(df /overlay 2>/dev/null | awk 'NR==2{print $4}')"
+    json_dump ;;
+
+  traffic)
+    mode=$(G wrtmax.net.mode); rx=0; tx=0
+    case "$mode" in
+      router) devs="wan" ;;
+      bridge|repeater|wisp) devs="$(sta_ifaces)" ;;
+      *) devs="$(wired_ports) wan" ;;
+    esac
+    [ -z "$(echo $devs)" ] && devs="$(wired_ports) wan"
+    for d in $devs; do
+      [ -r /sys/class/net/$d/statistics/rx_bytes ] || continue
+      rx=$((rx + $(cat /sys/class/net/$d/statistics/rx_bytes))); tx=$((tx + $(cat /sys/class/net/$d/statistics/tx_bytes)))
+    done
+    echo "{\"rx\":$rx,\"tx\":$tx,\"up\":$(cut -d. -f1 /proc/uptime)}" ;;
+
+  ports)
+    json_init; json_add_array ports
+    for p in $(wired_ports) wan; do
+      [ -d /sys/class/net/$p ] || continue
+      json_add_object ""
+      json_add_string name "$p"
+      c=$(cat /sys/class/net/$p/carrier 2>/dev/null); json_add_boolean link "${c:-0}"
+      s=$(cat /sys/class/net/$p/speed 2>/dev/null); case "$s" in ''|-*) s=0 ;; esac
+      json_add_int speed "$s"
+      json_add_string duplex "$(cat /sys/class/net/$p/duplex 2>/dev/null)"
+      r=$(G wrtmax.$p.role); json_add_string role "${r:-auto}"
+      iso=$(/usr/sbin/wrtmax-loopguard -c status 2>/dev/null | jsonfilter -e "@.ports[@.name=\"$p\"].isolated")
+      json_add_boolean isolated "$([ "$iso" = true ] && echo 1 || echo 0)"
+      json_close_object
+    done
+    json_close_array; json_dump ;;
+
+  clients)
+    json_init; json_add_array clients
+    for i in $(ap_ifaces); do
+      band=$(iface_band $i); ssid=$(iwinfo $i info 2>/dev/null | sed -n 's/.*ESSID: "\(.*\)".*/\1/p' | head -1)
+      iwinfo $i assoclist 2>/dev/null | awk '$1 ~ /^[0-9A-Fa-f][0-9A-Fa-f]:/ {print $1, $2}' > /tmp/wrtmax-assoc.$$
+      while read -r mac sig; do
+        lmac=$(echo "$mac" | tr 'A-F' 'a-f')
+        ip=$(awk -v m="$lmac" '$4==m {print $1; exit}' /proc/net/arp)
+        name=$(awk -v m="$lmac" '$2==m {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)
+        [ "$name" = "*" ] && name=""
+        key=lim_$(echo "$lmac" | tr -d ':')
+        json_add_object ""
+        json_add_string mac "$mac"; json_add_string ip "$ip"; json_add_string name "$name"
+        json_add_int signal "${sig:-0}"; json_add_string band "$band"; json_add_string ssid "$ssid"
+        json_add_int down "$(G wrtmax.$key.down || echo 0)"; json_add_int up "$(G wrtmax.$key.up || echo 0)"
+        json_close_object
+      done < /tmp/wrtmax-assoc.$$
+      rm -f /tmp/wrtmax-assoc.$$
+    done
+    json_close_array
+    json_add_array blocked
+    for m in $(G wrtmax.guard.blocked); do json_add_string "" "$m"; done
+    json_close_array
+    json_dump ;;
+
+  scan)
+    json_init; json_add_array nets
+    for i in $(ap_ifaces); do
+      band=$(iface_band $i)
+      iwinfo $i scan 2>/dev/null | awk '
+        /Address:/ {addr=$NF}
+        /ESSID:/ {sub(/^ *ESSID: /,""); ess=$0; gsub(/^"|"$/,"",ess)}
+        /Channel:/ {for(i=1;i<=NF;i++) if($i=="Channel:") ch=$(i+1)}
+        /Signal:/ {print addr "|" ess "|" ch "|" $2}' > /tmp/wrtmax-scan.$$
+      while IFS='|' read -r b s c sg; do
+        json_add_object ""
+        json_add_string bssid "$b"; json_add_string ssid "$s"; json_add_int channel "${c:-0}"
+        json_add_int signal "${sg:-0}"; json_add_string band "$band"
+        json_close_object
+      done < /tmp/wrtmax-scan.$$
+      rm -f /tmp/wrtmax-scan.$$
+    done
+    json_close_array
+    json_add_object own
+    for i in $(ap_ifaces); do
+      ch=$(iwinfo $i info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\) .*/\1/p' | head -1)
+      json_add_int "$(iface_band $i)" "${ch:-0}"
+    done
+    json_close_object
+    json_dump ;;
+
+  client_block)
+    mac=$(J mac | tr 'a-f' 'A-F')
+    [ -n "$mac" ] || { echo '{"ok":false}'; exit 0; }
+    for m in $(G wrtmax.guard.blocked); do [ "$m" = "$mac" ] && have=1; done
+    [ "$have" = 1 ] || { uci add_list wrtmax.guard.blocked="$mac"; uci commit wrtmax; }
+    /usr/sbin/wrtmax-guard
+    for i in $(ap_ifaces); do ubus call hostapd.$i del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":60000}" >/dev/null 2>&1; done
+    echo '{"ok":true}' ;;
+
+  client_unblock)
+    mac=$(J mac | tr 'a-f' 'A-F')
+    uci -q del_list wrtmax.guard.blocked="$mac"; uci commit wrtmax; /usr/sbin/wrtmax-guard
+    echo '{"ok":true}' ;;
+
+  client_limit)
+    mac=$(J mac | tr 'A-F' 'a-f'); d=$(J down); u=$(J up); key=lim_$(echo "$mac" | tr -d ':')
+    if [ "${d:-0}" -le 0 ] && [ "${u:-0}" -le 0 ]; then uci -q delete wrtmax.$key
+    else uci set wrtmax.$key=limit; uci set wrtmax.$key.mac="$mac"; uci set wrtmax.$key.down="${d:-0}"; uci set wrtmax.$key.up="${u:-0}"; fi
+    uci commit wrtmax; /usr/sbin/wrtmax-qos apply >/dev/null 2>&1
+    echo '{"ok":true}' ;;
+
+  apply_config)
+    # JS staged changes with uci.save(); commit them, rebuild bridge/SSIDs, apply
+    uci commit wrtmax; uci commit wireless 2>/dev/null
+    /usr/sbin/wrtmax-sync
+    ( sleep 2; /etc/init.d/network reload; sleep 4; wifi reload; /etc/init.d/wrtmax restart ) >/dev/null 2>&1 &
+    echo '{"ok":true}' ;;
+
+  save_settings)
+    uci commit wrtmax
+    cur=$(G network.wm_brlan.stp); want=$(G wrtmax.loop.stp); [ "${cur:-0}" = "${want:-0}" ] || {
+      /usr/sbin/wrtmax-sync; ( sleep 2; /etc/init.d/network reload ) >/dev/null 2>&1 & }
+    /usr/sbin/wrtmax-guard; /etc/init.d/wrtmax restart >/dev/null 2>&1
+    echo '{"ok":true}' ;;
+
+  apply_mode)
+    export MODE=$(J mode) IP=$(J ip) MASK=$(J mask) GW=$(J gw) DNS=$(J dns) BAND=$(J band)
+    export STA_SSID=$(J ssid) STA_KEY=$(J key) STA_BSSID=$(J bssid)
+    export WAN_PROTO=$(J wan_proto) PPP_USER=$(J user) PPP_PASS=$(J pass) WAN_IP=$(J wan_ip) WAN_MASK=$(J wan_mask) WAN_GW=$(J wan_gw)
+    /usr/sbin/wrtmax-mode >/dev/null 2>&1 && echo '{"ok":true}' || echo '{"ok":false}' ;;
+
+  ota)
+    act=$(J action); [ "$act" = apply ] && /usr/sbin/wrtmax-ota apply || /usr/sbin/wrtmax-ota check ;;
+
+  loop_state)
+    out=$(/usr/sbin/wrtmax-loopguard -c status 2>/dev/null); [ -n "$out" ] && echo "$out" || echo '{"running":false}' ;;
+
+  loop_reset)
+    p=$(J port | tr -cd 'a-z0-9'); [ -n "$p" ] || p=all
+    /usr/sbin/wrtmax-loopguard -c reset "$p" 2>/dev/null || echo '{"ok":false}' ;;
+
+  cpu_status)
+    [ -f /var/run/wrtmax-cpugov.json ] && cat /var/run/wrtmax-cpugov.json || echo '{"mode":"stopped"}' ;;
+
+  qos_status)
+    /usr/sbin/wrtmax-qos status ;;
+
+  offload_status)
+    ft=$(nft list flowtables 2>/dev/null); hw=0; sw=0
+    [ -n "$ft" ] && sw=1; echo "$ft" | grep -q 'flags offload' && hw=1
+    ent=$(grep -c . /proc/net/nf_conntrack 2>/dev/null)
+    echo "{\"uci_sw\":$([ "$(G firewall.@defaults[0].flow_offloading)" = 1 ] && echo true || echo false),\"uci_hw\":$([ "$(G firewall.@defaults[0].flow_offloading_hw)" = 1 ] && echo true || echo false),\"flowtable\":$([ $sw = 1 ] && echo true || echo false),\"hw_flag\":$([ $hw = 1 ] && echo true || echo false),\"conntrack\":${ent:-0}}" ;;
+
+  reg_status)
+    json_init; json_add_string regdom "$(iw reg get 2>/dev/null | sed -n 's/^country \([A-Z0-9][A-Z0-9]\):.*/\1/p' | head -1)"
+    json_add_boolean super "$([ "$(G wrtmax.wifi.super)" = 1 ] && echo 1 || echo 0)"
+    json_add_array phys
+    for ph in $(ls /sys/class/ieee80211 2>/dev/null); do
+      iw phy $ph info 2>/dev/null | awk '/MHz \[/ {f=$2; c=$4; gsub(/[\[\]]/,"",c); dis=($0 ~ /disabled/); if (f<3000) {t2++; if(!dis) e2++} else {t5++; if(!dis) e5++}
+          if(!dis && match($0,/\(([0-9.]+) dBm\)/)) {v=substr($0,RSTART+1,RLENGTH-6)+0; if (v>m) m=v}}
+        END {print e2+0, t2+0, e5+0, t5+0, m+0}' > /tmp/wrtmax-reg.$$
+      read -r e2 t2 e5 t5 mx < /tmp/wrtmax-reg.$$; rm -f /tmp/wrtmax-reg.$$
+      json_add_object ""; json_add_string phy "$ph"; json_add_int ch2_enabled "$e2"; json_add_int ch2_total "$t2"
+      json_add_int ch5_enabled "$e5"; json_add_int ch5_total "$t5"; json_add_int max_dbm "${mx%.*}"; json_close_object
+    done
+    json_close_array; json_dump ;;
+
+  set_lang)
+    l=$(J lang | tr -cd 'a-z'); [ "$l" = ar ] || l=en
+    uci set luci.main.lang="$l"; uci commit luci; rm -f /tmp/luci-indexcache* 2>/dev/null
+    echo '{"ok":true}' ;;
+
+  assistant)
+    json_init; json_add_array items
+    add() { json_add_object ""; json_add_string id "$1"; json_add_string level "$2"; json_add_string title "$3"
+            json_add_string detail "$4"; json_add_boolean fix "$5"; json_close_object; }
+    mode=$(G wrtmax.net.mode)
+    ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.*.up' | grep -q false && \
+      add wifi_reload warn "A Wi-Fi radio is down" "At least one radio is not running." 1
+    case "$mode" in ap|bridge|repeater)
+      [ "$(G dhcp.lan.ignore)" = 1 ] || add disable_dhcp bad "DHCP server is ON in $mode mode" "This can fight with the main router / MikroTik DHCP server." 1 ;;
+    esac
+    [ "$(G firewall.@defaults[0].flow_offloading_hw)" = 1 ] || add enable_offload warn "Hardware flow offloading is off" "Enable it for gigabit speed with low CPU use." 1
+    [ "$(G wrtmax.guard.enabled)" = 1 ] || add enable_guard warn "Network guard is disabled" "ARP-spoof / rogue-DHCP protection is off." 1
+    [ "$(G wrtmax.watchdog.enabled)" = 1 ] || add enable_watchdog warn "Watchdog is disabled" "The router will not recover from hangs by itself." 1
+    ma=$(awk '/^MemAvailable/{print $2}' /proc/meminfo); mt=$(awk '/^MemTotal/{print $2}' /proc/meminfo)
+    [ $((ma * 100 / mt)) -lt 10 ] && add drop_caches warn "Free memory is below 10%" "Clearing caches may help." 1
+    fl=$(df /overlay 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}')
+    [ -n "$fl" ] && [ "$fl" -gt 90 ] && add x warn "Flash storage is $fl% full" "Remove unused packages or files." 0
+    gw=$(G network.lan.gateway)
+    if [ -n "$gw" ] && [ "$mode" != router ]; then ping -c 1 -W 2 "$gw" >/dev/null 2>&1 || add x warn "Gateway $gw does not answer" "Check the uplink cable and the IP settings." 0; fi
+    for n in 1 2 3 4 5 6 7 8; do
+      [ "$(G wrtmax.ssid$n.enabled)" = 1 ] && [ -z "$(G wrtmax.ssid$n.key)" ] && add x info "SSID '$(G wrtmax.ssid$n.ssid)' is open (no password)" "Anyone can join this network." 0
+    done
+    [ "$(G wireless.$(radio_for_band 2g).country)" = "" ] && add x warn "No Wi-Fi country code is set" "Power and channels may be limited." 0
+    json_close_array; json_dump ;;
+
+  assistant_fix)
+    case "$(J id)" in
+      wifi_reload) wifi reload ;;
+      disable_dhcp) uci set dhcp.lan.ignore=1; uci commit dhcp; /etc/init.d/dnsmasq restart ;;
+      enable_offload) uci set firewall.@defaults[0].flow_offloading=1; uci set firewall.@defaults[0].flow_offloading_hw=1; uci commit firewall; /etc/init.d/firewall restart ;;
+      enable_guard) uci set wrtmax.guard.enabled=1; uci commit wrtmax; /usr/sbin/wrtmax-guard ;;
+      enable_watchdog) uci set wrtmax.watchdog.enabled=1; uci commit wrtmax ;;
+      drop_caches) sync; echo 3 > /proc/sys/vm/drop_caches ;;
+    esac
+    echo '{"ok":true}' ;;
+  esac ;;
+esac

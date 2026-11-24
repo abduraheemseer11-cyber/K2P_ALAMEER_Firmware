@@ -1,0 +1,17 @@
+{
+	"admin/wrtmax": {
+		"title": "WrtMax",
+		"order": 1,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-wrtmax" ] }
+	},
+	"admin/wrtmax/dashboard": { "title": "Dashboard", "order": 1, "action": { "type": "view", "path": "wrtmax/dashboard" } },
+	"admin/wrtmax/quick": { "title": "Quick Setup", "order": 2, "action": { "type": "view", "path": "wrtmax/quick" } },
+	"admin/wrtmax/wifi": { "title": "Wi-Fi & Driver Control", "order": 3, "action": { "type": "view", "path": "wrtmax/wifi" } },
+	"admin/wrtmax/analyzer": { "title": "Spectrum Analyzer", "order": 4, "action": { "type": "view", "path": "wrtmax/analyzer" } },
+	"admin/wrtmax/ports": { "title": "Ports & VLAN", "order": 5, "action": { "type": "view", "path": "wrtmax/ports" } },
+	"admin/wrtmax/clients": { "title": "Clients & QoS", "order": 6, "action": { "type": "view", "path": "wrtmax/clients" } },
+	"admin/wrtmax/protection": { "title": "Protection & Loop", "order": 7, "action": { "type": "view", "path": "wrtmax/protection" } },
+	"admin/wrtmax/power": { "title": "CPU & Power", "order": 8, "action": { "type": "view", "path": "wrtmax/power" } },
+	"admin/wrtmax/tools": { "title": "Tools & Updates", "order": 9, "action": { "type": "view", "path": "wrtmax/tools" } }
+}

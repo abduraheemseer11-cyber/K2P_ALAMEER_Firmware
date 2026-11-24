@@ -1,0 +1,22 @@
+#!/bin/sh
+# wrtmax-ota check | apply      Server layout:  <url>/latest.json  -> {"version":"1.0.1","file":"WrtMax-K2P-x.bin","sha256":"..."}
+. /lib/wrtmax/common.sh
+. /etc/wrtmax_release
+URL=$(G wrtmax.ota.url); URL="${URL%/}"
+[ -n "$URL" ] || { echo '{"ok":false,"error":"OTA server URL is not set"}'; exit 0; }
+J=/tmp/wrtmax-ota.json
+uclient-fetch -q -T 15 -O $J "$URL/latest.json" 2>/dev/null || { echo '{"ok":false,"error":"cannot reach the update server"}'; exit 0; }
+NV=$(jsonfilter -i $J -e '@.version'); NF=$(jsonfilter -i $J -e '@.file'); NS=$(jsonfilter -i $J -e '@.sha256')
+case "$1" in
+  check)
+    new=0; [ -n "$NV" ] && [ "$NV" != "$WRTMAX_VERSION" ] && new=1
+    printf '{"ok":true,"current":"%s","latest":"%s","update":%s}\n' "$WRTMAX_VERSION" "$NV" "$([ $new = 1 ] && echo true || echo false)" ;;
+  apply)
+    [ -n "$NF" ] && [ -n "$NS" ] || { echo '{"ok":false,"error":"bad latest.json"}'; exit 0; }
+    uclient-fetch -q -T 600 -O /tmp/wrtmax-ota.bin "$URL/$NF" || { echo '{"ok":false,"error":"download failed"}'; exit 0; }
+    [ "$(sha256sum /tmp/wrtmax-ota.bin | cut -d' ' -f1)" = "$NS" ] || { rm -f /tmp/wrtmax-ota.bin; echo '{"ok":false,"error":"checksum mismatch"}'; exit 0; }
+    sysupgrade -T /tmp/wrtmax-ota.bin >/dev/null 2>&1 || { echo '{"ok":false,"error":"image rejected by sysupgrade"}'; exit 0; }
+    ( sleep 3; sysupgrade /tmp/wrtmax-ota.bin ) >/dev/null 2>&1 &
+    echo '{"ok":true,"flashing":true}' ;;
+  *) echo '{"ok":false}' ;;
+esac

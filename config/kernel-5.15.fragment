@@ -1,0 +1,39 @@
+# WrtMax kernel fragment - appended to target/linux/ramips/mt7621/config-5.15 by build.sh
+# NOTE: `make defconfig` / kconfig silently DROPS symbols that do not exist or whose dependencies
+# are not met on this architecture. scripts/verify-kernel.sh prints, after the build, which of
+# these ended up in the real kernel .config (and why the rest cannot).
+
+# (2) CPU frequency scaling + governors.  MIPS only offers CPU_FREQ when the platform has
+#     CPU_SUPPORTS_CPUFREQ; the MT7621 PLL has no cpufreq driver in Linux 5.15, so expect
+#     these to be dropped -> wrtmax-cpugov then uses its verified fallback (core parking + IRQ tuning).
+CONFIG_CPU_FREQ=y
+CONFIG_CPU_FREQ_STAT=y
+CONFIG_CPU_FREQ_GOV_COMMON=y
+CONFIG_CPU_FREQ_GOV_ATTR_SET=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
+CONFIG_CPU_FREQ_GOV_POWERSAVE=y
+CONFIG_CPU_FREQ_GOV_ONDEMAND=y
+CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+# used by the fallback "core parking" power mode
+CONFIG_HOTPLUG_CPU=y
+
+# (4) Layer-2: bridge + STP + bridge netfilter + ebtables
+CONFIG_BRIDGE=y
+CONFIG_STP=y
+CONFIG_BRIDGE_VLAN_FILTERING=y
+CONFIG_BRIDGE_IGMP_SNOOPING=y
+CONFIG_BRIDGE_NETFILTER=y
+CONFIG_BRIDGE_EBT_BROUTE=y
+CONFIG_BRIDGE_NF_EBTABLES=y
+
+# (6) Flow offloading, built in (not modules)
+CONFIG_NF_FLOW_TABLE=y
+CONFIG_NF_FLOW_TABLE_INET=y
+CONFIG_NFT_FLOW_OFFLOAD=y
+# requested symbol; not a mainline 5.15 symbol on every tree (reported by verify-kernel.sh)
+CONFIG_NF_FLOW_TABLE_HW=y
+CONFIG_NET_CLS_U32=y
+CONFIG_NET_SCH_INGRESS=y
+CONFIG_NET_ACT_MIRRED=y

@@ -1,0 +1,94 @@
+name: Build WrtMax K2P Firmware (full source, OpenWrt v23.05.5)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_tag:
+        description: "OpenWrt git tag (must be a 23.05.x tag: kernel 5.15)"
+        required: false
+        default: "v23.05.5"
+      prepare_only:
+        description: "Only clone + patch + defconfig + verify (about 10 min)"
+        type: boolean
+        default: false
+      publish_release:
+        description: "Publish a GitHub Release with the firmware"
+        type: boolean
+        default: false
+  push:
+    branches: [main, master]
+    paths-ignore: ["**.md", "docs/**"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    env:
+      OPENWRT_TAG: ${{ github.event.inputs.openwrt_tag || 'v23.05.5' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-tests (no OpenWrt needed)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc nodejs python3-yaml
+          bash -n build.sh scripts/*.sh
+          for f in files/usr/sbin/* files/usr/libexec/rpcd/* files/lib/wrtmax/common.sh files/etc/init.d/* files/etc/uci-defaults/* files/www/cgi-bin/*; do
+            case "$f" in *wrtmax-mndp) continue ;; esac; sh -n "$f"; done
+          for f in $(find files -name '*.js'); do node --check "$f"; done
+          python3 -c "import json,glob;[json.load(open(f)) for f in glob.glob('files/**/*.json',recursive=True)]"
+          gcc -Wall -Wextra -O2 -o /tmp/lg package/wrtmax/wrtmax-loopguard/src/loopguard.c
+          rm -rf /tmp/t && mkdir /tmp/t && git -C /tmp/t init -q && for p in patches/*.patch; do git -C /tmp/t apply --check "$PWD/$p"; git -C /tmp/t apply "$PWD/$p"; done
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install OpenWrt build prerequisites
+        run: |
+          sudo apt-get install -y --no-install-recommends build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-distutils python3-setuptools python3-dev rsync unzip zlib1g-dev \
+            file wget swig ccache bc zstd xz-utils curl
+
+      - name: Cache dl/ (source tarballs)
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: wrtmax-dl-${{ env.OPENWRT_TAG }}-${{ hashFiles('config/*.config', 'config/*.txt') }}
+          restore-keys: wrtmax-dl-${{ env.OPENWRT_TAG }}-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: wrtmax-ccache-${{ env.OPENWRT_TAG }}-${{ github.run_id }}
+          restore-keys: wrtmax-ccache-${{ env.OPENWRT_TAG }}-
+
+      - name: Build (prepare only)
+        if: ${{ github.event.inputs.prepare_only == 'true' }}
+        run: bash ./build.sh prepare
+
+      - name: Build firmware (full source)
+        if: ${{ github.event.inputs.prepare_only != 'true' }}
+        run: bash ./build.sh
+
+      - name: Upload firmware + verification reports
+        if: ${{ success() && github.event.inputs.prepare_only != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: WrtMax-K2P-v2-firmware
+          path: output/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ github.event.inputs.publish_release == 'true' && github.event.inputs.prepare_only != 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wrtmax-k2p-v2-${{ github.run_number }}
+          name: WrtMax K2P v2 (full source) #${{ github.run_number }}
+          files: output/*

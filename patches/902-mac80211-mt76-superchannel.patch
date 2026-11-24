@@ -1,0 +1,73 @@
+diff --git a/package/kernel/mac80211/wrtmax/unsigned-regdb.py b/package/kernel/mac80211/wrtmax/unsigned-regdb.py
+new file mode 100644
+index 0000000..ae7c3f1
+--- /dev/null
++++ b/package/kernel/mac80211/wrtmax/unsigned-regdb.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++"""unsigned-regdb.py <prepared mac80211/backports source dir> [--diff-out FILE]
++
++cfg80211 only accepts /lib/firmware/regulatory.db when it carries a valid signature
++(CFG80211_REQUIRE_SIGNED_REGDB).  A locally rebuilt DB (with the 'CT' super-channel domain)
++cannot be signed with the upstream key, so this makes the option default to 'n' in
++net/wireless/Kconfig and, if a generated .config already exists, clears it there too.
++Every change is guarded: unknown layout -> exit code 3 and nothing is modified.
++"""
++import difflib, os, re, sys
++
++root = sys.argv[1]
++diff_out = sys.argv[sys.argv.index("--diff-out") + 1] if "--diff-out" in sys.argv else None
++changed = []
++
++def find(name):
++    for dp, _, fs in os.walk(root):
++        if name in fs and dp.replace(os.sep, "/").endswith("net/wireless"):
++            return os.path.join(dp, name)
++
++kc = find("Kconfig")
++if not kc:
++    print("unsigned-regdb: net/wireless/Kconfig not found under", root); sys.exit(3)
++old = open(kc).read()
++m = re.search(r"(config CFG80211_REQUIRE_SIGNED_REGDB\n(?:[ \t]+.*\n)*?[ \t]+default )y(\n)", old)
++if not m:
++    if re.search(r"config CFG80211_REQUIRE_SIGNED_REGDB\n(?:[ \t]+.*\n)*?[ \t]+default n\n", old):
++        print("unsigned-regdb: already relaxed - nothing to do"); sys.exit(0)
++    if "CFG80211_REQUIRE_SIGNED_REGDB" in old:
++        print("unsigned-regdb: option present but layout unknown - NOT modified"); sys.exit(3)
++    print("unsigned-regdb: option not present in this tree - nothing to do"); sys.exit(0)
++new = old[:m.start()] + m.group(1) + "n" + m.group(2) + old[m.end():]
++open(kc, "w").write(new)
++changed.append((kc, old, new))
++
++for dp, _, fs in os.walk(root):
++    if ".config" in fs:
++        p = os.path.join(dp, ".config"); o = open(p).read()
++        n = re.sub(r"^CPTCFG_CFG80211_REQUIRE_SIGNED_REGDB=y$", "# CPTCFG_CFG80211_REQUIRE_SIGNED_REGDB is not set", o, flags=re.M)
++        if n != o:
++            open(p, "w").write(n); changed.append((p, o, n))
++
++if diff_out:
++    with open(diff_out, "w") as f:
++        for p, o, n in changed:
++            f.writelines(difflib.unified_diff(o.splitlines(True), n.splitlines(True), "a/" + os.path.relpath(p, root), "b/" + os.path.relpath(p, root)))
++print("unsigned-regdb: modified %d file(s)" % len(changed))
+diff --git a/package/kernel/mt76/wrtmax/NOTES.md b/package/kernel/mt76/wrtmax/NOTES.md
+new file mode 100644
+index 0000000..8d3eac5
+--- /dev/null
++++ b/package/kernel/mt76/wrtmax/NOTES.md
+@@ -0,0 +1,14 @@
++# mt76 / MT7615D and the super-channel patch set
++
++No C change to mt76 is shipped, deliberately:
++
++* mt7615 derives the channel list and per-channel `max_power` from cfg80211. With the `CT` domain in
++  `regulatory.db` (patch 901) and the signature check relaxed (patch 902, `unsigned-regdb.py`),
++  channels 1-14 / 36-177 and 27 dBm are offered to mt76 unchanged.
++* The power finally radiated is min(regdb limit, user txpower, EEPROM/PA calibration of the K2P).
++  Raising it beyond the EEPROM table needs a calibration change, not a driver patch.
++* A blind C patch against mt76 sources that were not available when this repository was written
++  could not be validated, and a silently non-applying patch would break the whole build.
++
++If you want to add one anyway, drop a quilt patch into `package/kernel/mt76/patches/` (it is applied
++automatically by the OpenWrt build system) and let CI prove that it applies.
