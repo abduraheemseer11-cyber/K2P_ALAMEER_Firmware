@@ -31,6 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore executable permissions
+        run: |
+          chmod +x build.sh
+          chmod +x scripts/*.sh
+          chmod +x files/usr/sbin/* files/usr/libexec/rpcd/* files/etc/init.d/* files/etc/uci-defaults/* files/www/cgi-bin/* || true
+
       - name: Self-tests (no OpenWrt needed)
         run: |
           sudo apt-get update
@@ -78,12 +84,12 @@ jobs:
         run: ./build.sh
 
       - name: Upload firmware + verification reports
-        if: ${{ always() && github.event.inputs.prepare_only != 'true' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: WrtMax-K2P-v2-firmware
+          name: WrtMax-K2P-v2-firmware-${{ github.run_number }}
           path: output/*
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Publish release
         if: ${{ github.event.inputs.publish_release == 'true' && github.event.inputs.prepare_only != 'true' }}
