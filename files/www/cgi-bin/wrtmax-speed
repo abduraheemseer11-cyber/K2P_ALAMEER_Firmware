@@ -1,0 +1,13 @@
+#!/bin/sh
+# Browser <-> router speed test.  GET ?mb=N streams N MB (max 64) ; POST sinks the upload.
+echo "Cache-Control: no-store"
+if [ "$REQUEST_METHOD" = "POST" ]; then
+  printf 'Content-Type: text/plain\r\n\r\n'
+  cat >/dev/null
+  echo ok
+  exit 0
+fi
+MB=$(echo "$QUERY_STRING" | sed -n 's/.*mb=\([0-9]*\).*/\1/p'); [ -n "$MB" ] || MB=8
+[ "$MB" -gt 64 ] && MB=64
+printf 'Content-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n' $((MB * 1048576))
+dd if=/dev/zero bs=65536 count=$((MB * 16)) 2>/dev/null

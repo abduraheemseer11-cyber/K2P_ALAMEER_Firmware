@@ -1,0 +1,73 @@
+diff --git a/package/firmware/wireless-regdb/wrtmax/build-regdb.sh b/package/firmware/wireless-regdb/wrtmax/build-regdb.sh
+new file mode 100755
+index 0000000..af9d1b3
+--- /dev/null
++++ b/package/firmware/wireless-regdb/wrtmax/build-regdb.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++# build-regdb.sh <wireless-regdb build dir>
++# Adds the WrtMax 'CT' country to db.txt and rebuilds regulatory.db with upstream's own db2fw.py.
++# Run by build.sh after `make package/firmware/wireless-regdb/prepare`.
++set -e
++D="$1"; H="$(cd "$(dirname "$0")" && pwd)"
++[ -d "$D" ] || { echo "build-regdb: build dir '$D' not found"; exit 1; }
++[ -f "$D/db.txt" ] || { echo "build-regdb: $D/db.txt missing (package layout changed?)"; exit 1; }
++python3 "$H/inject-ct.py" "$D/db.txt" "$H/ct-country.txt"
++if [ -f "$D/db2fw.py" ]; then
++	( cd "$D" && python3 db2fw.py regulatory.db db.txt )
++else
++	echo "build-regdb: $D/db2fw.py missing - cannot rebuild regulatory.db"; exit 1
++fi
++[ -s "$D/regulatory.db" ] || { echo "build-regdb: regulatory.db is empty"; exit 1; }
++# marker so the verification step can prove the CT domain is inside the DB that gets installed
++grep -q '^country CT:' "$D/db.txt" && echo "build-regdb: OK ($(wc -c < "$D/regulatory.db") bytes)"
+diff --git a/package/firmware/wireless-regdb/wrtmax/ct-country.txt b/package/firmware/wireless-regdb/wrtmax/ct-country.txt
+new file mode 100644
+index 0000000..7295557
+--- /dev/null
++++ b/package/firmware/wireless-regdb/wrtmax/ct-country.txt
+@@ -0,0 +1,13 @@
++
++# ---------------------------------------------------------------------------
++# WrtMax "Super Channel" / Compliance-Test domain.  Selected with  country 'CT'.
++# Unlocks 2.4 GHz channels 1-14 and 5 GHz channels 36-177 with no DFS / NO-IR
++# restrictions and up to 27 dBm EIRP.
++#   * Channel 14 is CCK-only (NO-OFDM) - cfg80211 never allows OFDM there.
++#   * The radio's EEPROM / PA still caps the real output power.
++#   * Using this outside a shielded test environment is illegal in most countries.
++# ---------------------------------------------------------------------------
++country CT: DFS-UNSET
++	(2402 - 2482 @ 40), (27)
++	(2474 - 2494 @ 20), (27), NO-OFDM
++	(5150 - 5895 @ 160), (27)
+diff --git a/package/firmware/wireless-regdb/wrtmax/inject-ct.py b/package/firmware/wireless-regdb/wrtmax/inject-ct.py
+new file mode 100644
+index 0000000..e4ce851
+--- /dev/null
++++ b/package/firmware/wireless-regdb/wrtmax/inject-ct.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python3
++"""inject-ct.py <db.txt> <ct-country.txt>  - append the WrtMax 'CT' country to a wireless-regdb db.txt (idempotent)."""
++import re, sys
++
++db_path, ct_path = sys.argv[1], sys.argv[2]
++db = open(db_path, encoding="utf-8").read()
++ct = open(ct_path, encoding="utf-8").read()
++
++if re.search(r"^country\s+CT\s*:", db, re.M):
++    print("inject-ct: CT already present - nothing to do")
++else:
++    if not db.endswith("\n"):
++        db += "\n"
++    open(db_path, "w", encoding="utf-8").write(db + ct)
++    print("inject-ct: CT country appended")
++
++# sanity: every rule line of the CT block must look like a regdb rule, block must be the last one
++db = open(db_path, encoding="utf-8").read()
++m = re.search(r"^country\s+CT\s*:.*?(?=^country\s|\Z)", db, re.M | re.S)
++rules = [l.strip() for l in m.group(0).splitlines()[1:] if l.strip() and not l.strip().startswith("#")]
++rx = re.compile(r"^\(\s*\d+\s*-\s*\d+\s*@\s*\d+\s*\)\s*,\s*\(\s*\d+(\.\d+)?\s*\)(\s*,\s*[A-Z0-9-]+)*$")
++bad = [r for r in rules if not rx.match(r)]
++if bad or not rules:
++    sys.exit("inject-ct: malformed CT rules: %r" % bad)
++print("inject-ct: %d CT rules OK" % len(rules))

@@ -1,0 +1,105 @@
+#!/bin/sh
+# Quick Mode wizard backend. Parameters come from environment variables:
+#   MODE=ap|bridge|repeater|wisp|router   IP MASK GW DNS
+#   BAND=2g|5g  STA_SSID STA_KEY STA_BSSID          (bridge / repeater / wisp)
+#   WAN_PROTO=dhcp|pppoe|static  PPP_USER PPP_PASS  WAN_IP WAN_MASK WAN_GW   (router)
+. /lib/wrtmax/common.sh
+
+: "${IP:=192.168.1.20}" "${MASK:=255.255.255.0}" "${BAND:=2g}"
+
+# ---- clean previous mode leftovers
+for s in wan wan6 wwan wm_relay; do uci -q delete network.$s; done
+uci -q delete wireless.wm_sta
+uci set wrtmax.net=settings 2>/dev/null
+uci set wrtmax.net.mode="$MODE"
+
+set_lan_static() {
+  uci set network.lan.proto=static
+  uci set network.lan.ipaddr="$IP"
+  uci set network.lan.netmask="$MASK"
+  uci -q delete network.lan.gateway
+  uci -q delete network.lan.dns
+  [ -n "$GW" ] && uci set network.lan.gateway="$GW"
+  [ -n "$DNS" ] && for d in $(echo "$DNS" | tr ',' ' '); do uci add_list network.lan.dns="$d"; done
+}
+dhcp_off() {
+  uci set dhcp.lan=dhcp; uci set dhcp.lan.interface=lan
+  uci set dhcp.lan.ignore=1
+  uci set dhcp.lan.dhcpv6=disabled; uci set dhcp.lan.ra=disabled; uci set dhcp.lan.ndp=disabled
+}
+dhcp_on() {
+  uci set dhcp.lan=dhcp; uci set dhcp.lan.interface=lan
+  uci -q delete dhcp.lan.ignore
+  uci set dhcp.lan.start=100; uci set dhcp.lan.limit=150; uci set dhcp.lan.leasetime=12h
+  uci set dhcp.lan.dhcpv6=disabled; uci set dhcp.lan.ra=disabled; uci set dhcp.lan.ndp=disabled
+}
+add_sta() { # $1 = network  $2 = wds(0/1)
+  local r; r=$(radio_for_band "$BAND")
+  [ -n "$r" ] || return 1
+  uci set wireless.wm_sta=wifi-iface
+  uci set wireless.wm_sta.device=$r
+  uci set wireless.wm_sta.mode=sta
+  uci set wireless.wm_sta.ssid="$STA_SSID"
+  uci set wireless.wm_sta.network="$1"
+  [ -n "$STA_BSSID" ] && uci set wireless.wm_sta.bssid="$STA_BSSID"
+  [ "$2" = 1 ] && uci set wireless.wm_sta.wds=1
+  if [ ${#STA_KEY} -ge 8 ]; then
+    uci set wireless.wm_sta.encryption='psk2+ccmp'; uci set wireless.wm_sta.key="$STA_KEY"
+  else
+    uci set wireless.wm_sta.encryption=none
+  fi
+}
+
+case "$MODE" in
+  ap)
+    uci set wrtmax.net.merge_wan=1
+    set_lan_static; dhcp_off
+    fw_zone_nets lan lan ;;
+  bridge)
+    uci set wrtmax.net.merge_wan=1
+    set_lan_static; dhcp_off
+    add_sta lan 1
+    fw_zone_nets lan lan ;;
+  repeater)
+    uci set wrtmax.net.merge_wan=1
+    set_lan_static; dhcp_off
+    uci set network.wwan=interface; uci set network.wwan.proto=dhcp
+    uci set network.wm_relay=interface; uci set network.wm_relay.proto=relay
+    uci add_list network.wm_relay.network=lan; uci add_list network.wm_relay.network=wwan
+    add_sta wwan 0
+    fw_zone_nets lan lan wwan wm_relay ;;
+  wisp)
+    uci set wrtmax.net.merge_wan=1
+    set_lan_static; uci -q delete network.lan.gateway; uci -q delete network.lan.dns
+    dhcp_on
+    uci set network.wwan=interface; uci set network.wwan.proto=dhcp
+    add_sta wwan 0
+    fw_zone_nets lan lan; fw_zone_nets wan wwan ;;
+  router)
+    uci set wrtmax.net.merge_wan=0
+    set_lan_static; uci -q delete network.lan.gateway; uci -q delete network.lan.dns
+    dhcp_on
+    uci set network.wan=interface; uci set network.wan.device=wan
+    case "$WAN_PROTO" in
+      pppoe) uci set network.wan.proto=pppoe; uci set network.wan.username="$PPP_USER"
+             uci set network.wan.password="$PPP_PASS"; uci set network.wan.ipv6=0 ;;
+      static) uci set network.wan.proto=static; uci set network.wan.ipaddr="$WAN_IP"
+              uci set network.wan.netmask="${WAN_MASK:-255.255.255.0}"; uci set network.wan.gateway="$WAN_GW"
+              for d in $(echo "$DNS" | tr ',' ' '); do uci add_list network.wan.dns="$d"; done ;;
+      *) uci set network.wan.proto=dhcp ;;
+    esac
+    fw_zone_nets lan lan; fw_zone_nets wan wan ;;
+  *) echo "unknown mode: $MODE" >&2; exit 1 ;;
+esac
+
+uci commit wrtmax; uci commit dhcp; uci commit firewall
+uci commit network; uci commit wireless
+/usr/sbin/wrtmax-sync
+
+# apply in the background so the HTTP answer can still be delivered
+( sleep 3
+  /etc/init.d/network restart
+  sleep 6; wifi reload
+  /etc/init.d/dnsmasq restart; /etc/init.d/odhcpd restart 2>/dev/null
+  /etc/init.d/firewall restart; /etc/init.d/wrtmax restart ) >/dev/null 2>&1 &
+exit 0
