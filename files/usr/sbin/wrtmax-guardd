@@ -1,9 +1,0 @@
-#!/bin/sh
-# Background monitor: re-applies the nft guard whenever Wi-Fi interfaces / addresses change.
-# (Loop + storm protection now lives in the C daemon wrtmax-loopguard.)
-. /lib/wrtmax/common.sh
-SIG=""
-while sleep 20; do
-  NS="$(ap_ifaces | tr '\n' ' ')$(G network.lan.ipaddr)$(G network.lan.gateway)$(G wrtmax.guard.protect)"
-  [ "$NS" != "$SIG" ] && { SIG="$NS"; /usr/sbin/wrtmax-guard; }
-done
