@@ -23,7 +23,7 @@ index 0000000..af9d1b3
 +grep -q '^country CT:' "$D/db.txt" && echo "build-regdb: OK ($(wc -c < "$D/regulatory.db") bytes)"
 diff --git a/package/firmware/wireless-regdb/wrtmax/ct-country.txt b/package/firmware/wireless-regdb/wrtmax/ct-country.txt
 new file mode 100644
-index 0000000..7295557
+index 0000000..8b4e112
 --- /dev/null
 +++ b/package/firmware/wireless-regdb/wrtmax/ct-country.txt
 @@ -0,0 +1,13 @@
@@ -36,7 +36,7 @@ index 0000000..7295557
 +#   * The radio's EEPROM / PA still caps the real output power.
 +#   * Using this outside a shielded test environment is illegal in most countries.
 +# ---------------------------------------------------------------------------
-+country CT: DFS-UNSET
++country CT:
 +	(2402 - 2482 @ 40), (27)
 +	(2474 - 2494 @ 20), (27), NO-OFDM
 +	(5150 - 5895 @ 160), (27)
