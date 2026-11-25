@@ -4,12 +4,12 @@
 #  git clone openwrt (tag v23.05.5) + feeds + patches + make
 #  Usage:  ./build.sh            full build
 #          ./build.sh prepare    stop after defconfig + config verification
-#  Env:    OPENWRT_TAG (v23.05.5)  OPENWRT_REPO  JOBS  WRTMAX_ALLOW_SIGNED_REGDB=1
+#  Env:    OPENWRT_TAG (v23.05.5)  OPENWRT_REPO  JOBS
 # =====================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
-OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
+OPENWRT_REPO="${OPENWRT_REPO:-https://github.com}"
 OPENWRT_TAG="${OPENWRT_TAG:-v23.05.5}"
 JOBS="${JOBS:-$(nproc)}"
 WRTMAX_VERSION="2.0.0"
@@ -40,8 +40,8 @@ say "source tree verified at $OPENWRT_TAG ($HEAD_SHA)"
 
 # caches live outside the source tree so CI can persist them
 rm -rf "$SRC/dl" "$SRC/.ccache"
-ln -s "$ROOT/dl" "$SRC/dl"
-ln -s "$ROOT/.ccache" "$SRC/.ccache"
+ln -sfn "$ROOT/dl" "$SRC/dl"
+ln -sfn "$ROOT/.ccache" "$SRC/.ccache"
 export CCACHE_DIR="$ROOT/.ccache" CCACHE_MAXSIZE=4G
 
 say "Feeds"
@@ -102,6 +102,7 @@ fi
 mk defconfig
 
 say "Verifying final .config"
+chmod +x scripts/*.sh
 scripts/verify-config.sh "$SRC" || die "required symbols missing from the final .config (see above)"
 
 if [[ "$MODE" == "prepare" ]]; then
@@ -117,7 +118,9 @@ for d in etc/uci-defaults etc/init.d usr/sbin usr/libexec/rpcd www/cgi-bin lib/w
     find "$STAGE/$d" -type f -exec chmod 0755 {} +
   fi
 done
-find "$STAGE" -type f ! -name '*.png' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+# strip CRLF from text files only, leaving binaries intact
+find "$STAGE" -type f ! -name '*.png' ! -name '*.bin' ! -name '*.so*' \
+  ! -name '*.db' ! -name '*.ipk' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
 find "$STAGE" -name '.gitkeep' -delete 2>/dev/null || true
 cat > "$STAGE/etc/wrtmax_release" <<REL
 WRTMAX_VERSION='$WRTMAX_VERSION'
@@ -135,9 +138,13 @@ say "Super Channel: rebuild regulatory.db with the CT domain"
 mk package/firmware/wireless-regdb/download package/firmware/wireless-regdb/prepare
 RB="$(find "$SRC/build_dir" -maxdepth 3 -type d -name 'wireless-regdb-*' 2>/dev/null | head -1 || true)"
 [[ -n "$RB" ]] || die "wireless-regdb build dir not found after prepare"
+[[ -x "$SRC/package/firmware/wireless-regdb/wrtmax/build-regdb.sh" ]] \
+  || die "build-regdb.sh missing - tree patch did not apply cleanly"
 "$SRC/package/firmware/wireless-regdb/wrtmax/build-regdb.sh" "$RB" \
   || die "could not add the CT domain to regulatory.db"
 cp "$RB/db.txt" "$OUT/source-patches/wireless-regdb-db.txt"
+mkdir -p "$STAGE/lib/firmware"
+cp "$RB/regulatory.db" "$STAGE/lib/firmware/regulatory.db"
 mk package/firmware/wireless-regdb/compile
 
 say "Super Channel: allow the locally built (unsigned) regulatory.db in cfg80211"
@@ -157,9 +164,9 @@ mk -j"$JOBS" download
 
 say "Compiling firmware ($JOBS jobs) - this takes 1-3 hours on a cold cache"
 if ! mk -j"$JOBS"; then
-  say "Parallel build failed - retrying single-threaded with full log (last 120 lines shown)"
-  mk -j1 V=s 2>&1 | tail -n 120 || true
-  die "build failed - see full log above"
+  say "Parallel build failed - retrying single-threaded with full log (last 200 lines shown)"
+  mk -j1 V=s 2>&1 | tee /tmp/build-fail.log | tail -n 200 || true
+  die "build failed - see /tmp/build-fail.log and the log above"
 fi
 
 # ---------------------------------------------------------------- 7. verification + output
@@ -167,13 +174,12 @@ say "Verifying what was really built"
 scripts/verify-kernel.sh "$SRC" "$OUT/kernel-feature-report.txt" \
   || die "kernel feature verification failed (see report)"
 
-REGIPK="$(find "$SRC/bin/packages" -type f -name 'wireless-regdb_*.ipk' 2>/dev/null | head -1 || true)"
-if [[ -n "$REGIPK" && -f "$REGIPK" ]]; then
-  python3 scripts/regdb-has-country.py "$REGIPK" CT \
+if [[ -f "$STAGE/lib/firmware/regulatory.db" ]]; then
+  python3 scripts/regdb-has-country.py "$STAGE/lib/firmware/regulatory.db" CT \
     | tee -a "$OUT/kernel-feature-report.txt" \
-    || die "CT country missing from the packaged regulatory.db"
+    || die "CT country missing from regulatory.db"
 else
-  echo "  (wireless-regdb ipk not found - skipped)"
+  echo "  (regulatory.db not found - skipped)"
 fi
 
 scripts/check-image.sh "$SRC" "$OUT" || die "image size check failed"
