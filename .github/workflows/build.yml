@@ -31,17 +31,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore executable permissions
+        run: |
+          chmod +x build.sh 2>/dev/null || true
+          chmod +x scripts/*.sh 2>/dev/null || true
+          chmod +x files/usr/sbin/* files/usr/libexec/rpcd/* \
+            files/etc/init.d/* files/etc/uci-defaults/* \
+            files/www/cgi-bin/* 2>/dev/null || true
+
       - name: Self-tests (no OpenWrt needed)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc nodejs python3-yaml
+          python3 -c "import yaml; yaml.safe_load(open('.github/workflows/build.yml'))"
           bash -n build.sh scripts/*.sh
-          for f in files/usr/sbin/* files/usr/libexec/rpcd/* files/lib/wrtmax/common.sh files/etc/init.d/* files/etc/uci-defaults/* files/www/cgi-bin/*; do
-            case "$f" in *wrtmax-mndp) continue ;; esac; sh -n "$f"; done
+          for f in files/usr/sbin/* files/usr/libexec/rpcd/* \
+                   files/lib/wrtmax/common.sh files/etc/init.d/* \
+                   files/etc/uci-defaults/* files/www/cgi-bin/*; do
+            case "$f" in *wrtmax-mndp) continue ;; esac
+            sh -n "$f"
+          done
           for f in $(find files -name '*.js'); do node --check "$f"; done
           python3 -c "import json,glob;[json.load(open(f)) for f in glob.glob('files/**/*.json',recursive=True)]"
           gcc -Wall -Wextra -O2 -o /tmp/lg package/wrtmax/wrtmax-loopguard/src/loopguard.c
-          rm -rf /tmp/t && mkdir /tmp/t && git -C /tmp/t init -q && for p in patches/*.patch; do git -C /tmp/t apply --check "$PWD/$p"; git -C /tmp/t apply "$PWD/$p"; done
+          rm -rf /tmp/t && mkdir /tmp/t && git -C /tmp/t init -q
+          git -C /tmp/t config user.email ci@wrtmax.local
+          git -C /tmp/t config user.name  ci
+          git -C /tmp/t commit --allow-empty -q -m init
+          for p in patches/*.patch; do
+            git -C /tmp/t apply --check "$PWD/$p"
+            git -C /tmp/t apply "$PWD/$p"
+          done
 
       - name: Free disk space
         run: |
@@ -81,7 +101,7 @@ jobs:
         if: ${{ success() && github.event.inputs.prepare_only != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: WrtMax-K2P-v2-firmware
+          name: WrtMax-K2P-v2-firmware-${{ github.run_number }}
           path: output/*
           if-no-files-found: error
 
